@@ -3,66 +3,107 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Livre proportionnel – Intégration SharePoint</title>
 <style>
   :root{
-    --book-max-width: 1100px;
+    /* FORMAT PHYSIQUE D'UNE PAGE (mm) - A4 par défaut */
+    --book-width-mm: 210;
+    --book-height-mm: 297;
+
     --book-radius: 6px;
 
-    --turn-duration: 900ms;
-    --turn-ease: cubic-bezier(.4,.1,.2,1);
+    /* Durée/courbe de l'animation de tourne-page */
+    --turn-duration: 850ms;
+    --turn-ease: cubic-bezier(.45,.05,.15,1);
 
-    --spine-width: 28px;
+    --spine-width: 26px; /* sera ajusté dynamiquement en JS */
     --edge-shadow: rgba(0,0,0,0.18);
     --inner-shadow: rgba(0,0,0,0.28);
-    --page-line: rgba(0,0,0,0.06);
 
     --img-fade-duration: 220ms;
     --img-fade-ease: ease-out;
 
-    --paper: #fbfaf6;
+    --paper: #f7f1e3;
+
+    /* Mis à jour en JS selon le format mm */
+    --spread-aspect: 1.414;
+
+    /* Zoom et pan */
+    --zoom: 1;
+    --pan-x: 0px;
+    --pan-y: 0px;
   }
 
+  html, body { width: 100%; height: 100%; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  /* Fond clair du webpart (SharePoint) */
   body {
     font-family: Arial, sans-serif;
-    background: radial-gradient(ellipse at center, #3a3f47 0%, #1c1f24 100%);
-    min-height: 100vh;
+    background: #edf2fb; /* couleur demandée */
+    overflow: hidden;
+    color: #333;
+  }
+
+  .app {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
   }
 
   .book-scene {
     width: 100%;
-    height: 78vh;
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
     justify-content: center;
     align-items: center;
-    perspective: 2400px;
-  }
-
-  /* Support / table sur laquelle "repose" le livre, pour renforcer l'illusion 3D */
-  .book-pedestal {
-    width: min(var(--book-max-width), 95%);
-    height: 92%;
+    perspective: 2600px;
+    padding: 12px;
+    overflow: hidden;
     position: relative;
-    transform: rotateX(8deg);
-    transform-style: preserve-3d;
   }
 
-  .book {
+  .book-pedestal {
+    position: relative;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
     width: 100%;
     height: 100%;
-    display: flex;
+  }
+
+  .zoom-wrap {
+    display: inline-block;
+    transform: translate(var(--pan-x), var(--pan-y)) scale(var(--zoom));
+    transform-origin: center center;
+    will-change: transform;
+    touch-action: none;
+  }
+
+  .pannable { cursor: grab; }
+  .panning  { cursor: grabbing; }
+
+  /* Le livre est dimensionné dynamiquement; on anime width/height pour la fluidité
+     lors du passage "page simple" (couverture) <-> "spread" (double page). */
+  .book {
     position: relative;
+    display: flex;
     touch-action: pan-y;
     border-radius: var(--book-radius);
     background: var(--paper);
     overflow: visible;
     transform-style: preserve-3d;
     box-shadow:
-      0 30px 60px rgba(0,0,0,0.45),
-      0 8px 16px rgba(0,0,0,0.3);
+      0 30px 60px rgba(0,0,0,0.25),
+      0 8px 16px rgba(0,0,0,0.18);
+    transition:
+      width  var(--turn-duration) var(--turn-ease),
+      height var(--turn-duration) var(--turn-ease);
+    will-change: width, height;
   }
 
-  /* Tranche / pages empilées vues de profil (gauche et droite) pour donner de l'épaisseur au livre */
   .book::before,
   .book::after {
     content: "";
@@ -80,11 +121,13 @@
   .book::before { left: -8px; border-radius: 4px 0 0 4px; transform: skewY(2deg); box-shadow: inset -2px 0 4px rgba(0,0,0,0.2); }
   .book::after  { right: -8px; border-radius: 0 4px 4px 0; transform: skewY(-2deg); box-shadow: inset 2px 0 4px rgba(0,0,0,0.2); }
 
-  /* Reliure centrale en relief, façon dos de livre cousu */
+  /* Masquage des tranches uniquement quand il manque réellement un volet en mode intérieur */
+  .book.no-left:not(.cover-mode)::before  { display: none; }
+  .book.no-right:not(.cover-mode)::after  { display: none; }
+
   .spine {
     position: absolute;
-    top: -6px;
-    bottom: -6px;
+    top: -6px; bottom: -6px;
     left: calc(50% - var(--spine-width)/2);
     width: var(--spine-width);
     pointer-events: none;
@@ -102,11 +145,13 @@
       inset 0 0 24px rgba(0,0,0,0.35),
       0 0 18px rgba(0,0,0,0.25);
     border-radius: 3px;
+    transition: opacity 0.3s ease, width 0.2s ease; /* transition douce si la largeur change */
+    will-change: opacity, width;
   }
+  .book.cover-mode .spine { opacity: 0; }
 
   .page {
     width: 50%;
-    height: 100%;
     background: var(--paper);
     overflow: hidden;
     display: flex;
@@ -115,28 +160,32 @@
     user-select: none;
     position: relative;
     z-index: 1;
+    transition: width var(--turn-duration) var(--turn-ease);
+    will-change: width;
   }
   .page.left  {
     border-radius: var(--book-radius) 0 0 var(--book-radius);
-    transform: rotateY(1.2deg);
     transform-origin: right center;
   }
   .page.right {
     border-radius: 0 var(--book-radius) var(--book-radius) 0;
-    transform: rotateY(-1.2deg);
     transform-origin: left center;
   }
 
-  /* Ombre portée au centre, sur la reliure, projetée sur les deux pages */
+  .book.cover-mode .page.left,
+  .book.cover-mode .page.right {
+    border-radius: var(--book-radius);
+  }
+
   .page.left::after,
   .page.right::after {
     content: "";
     position: absolute;
-    top: 0;
-    bottom: 0;
+    top: 0; bottom: 0;
     width: 60px;
     pointer-events: none;
     z-index: 2;
+    transition: opacity 0.3s ease;
   }
   .page.left::after {
     right: 0;
@@ -146,8 +195,8 @@
     left: 0;
     background: linear-gradient(270deg, rgba(0,0,0,0) 0%, var(--edge-shadow) 85%, var(--inner-shadow) 100%);
   }
+  .book.cover-mode .page::after { opacity: 0; }
 
-  /* Ombre douce en haut/bas pour donner du volume (effet papier courbé au repos) */
   .page::before {
     content: "";
     position: absolute;
@@ -172,164 +221,298 @@
   }
   .page img.is-visible { opacity: 1; }
 
-  /* ===== Feuille animée (tourne-page) =====
-     Composée de plusieurs "lattes" verticales pour simuler la courbure
-     d'une vraie page (chaque latte tourne avec un angle légèrement
-     différent, créant un effet d'arc plutôt qu'un panneau plat). */
+  /* ===================== FEUILLE QUI TOURNE ===================== */
   .flip {
     position: absolute;
-    top: 0;
-    bottom: 0;
+    top: 0; bottom: 0;
     width: 50%;
     z-index: 6;
     transform-style: preserve-3d;
     pointer-events: none;
+    will-change: transform;
   }
-  .flip-strip {
+  .flip.cover-flip { width: 100%; }
+
+  .flip-face {
     position: absolute;
-    top: 0;
-    bottom: 0;
-    height: 100%;
+    inset: 0;
     overflow: hidden;
     background: var(--paper);
     backface-visibility: hidden;
-    box-shadow: 0 0 24px rgba(0,0,0,0.25);
+    -webkit-backface-visibility: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
-  .flip-strip img {
-    position: absolute;
-    top: 0;
+  .flip-face img {
+    width: 100%;
     height: 100%;
     object-fit: contain;
     pointer-events: none;
   }
-  /* Ombrage dynamique appliqué à chaque latte pendant la rotation,
-     plus sombre côté reliure pour simuler le creux de la courbure */
-  .flip-strip .shade {
+  .flip-face.back { transform: rotateY(180deg); }
+
+  .flip-face .crease {
     position: absolute;
     inset: 0;
-    background: linear-gradient(90deg, rgba(0,0,0,0.35), rgba(0,0,0,0) 60%);
-    opacity: 0;
-    transition: opacity var(--turn-duration) var(--turn-ease);
     pointer-events: none;
+    opacity: 0;
   }
-  .flip.animating .flip-strip .shade { opacity: 1; }
+  .flip-face.front .crease {
+    background: linear-gradient(90deg, rgba(0,0,0,0) 55%, rgba(0,0,0,0.45) 100%);
+  }
+  .flip-face.back .crease {
+    background: linear-gradient(90deg, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0) 45%);
+  }
 
-  /* Ombre projetée par la page qui se soulève sur la page restée à plat */
   .lift-shadow {
     position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 38%;
+    top: 0; bottom: 0;
+    width: 42%;
     z-index: 3;
     pointer-events: none;
-    background: linear-gradient(90deg, rgba(0,0,0,0.30), rgba(0,0,0,0));
+    background: linear-gradient(90deg, rgba(0,0,0,0.32), rgba(0,0,0,0));
     opacity: 0;
-    transition: opacity var(--turn-duration) var(--turn-ease);
+    will-change: opacity;
   }
-  .lift-shadow.from-right { right: 50%; background: linear-gradient(270deg, rgba(0,0,0,0.30), rgba(0,0,0,0)); }
+  .lift-shadow.from-right { right: 50%; background: linear-gradient(270deg, rgba(0,0,0,0.32), rgba(0,0,0,0)); }
   .lift-shadow.from-left  { left: 50%; }
-  .lift-shadow.show { opacity: 1; }
+  .lift-shadow.cover-from-right { right: 0; width: 60%; background: linear-gradient(270deg, rgba(0,0,0,0.32), rgba(0,0,0,0)); }
+  .lift-shadow.cover-from-left  { left: 0; width: 60%; }
+
+  /* États transitoires (si besoin d'ajouter des effets supplémentaires) */
+  .book.opening .spine { opacity: 0; }
+  .book.closing .spine { opacity: 0; }
 
   .controls {
+    width: 100%;
+    flex: 0 0 auto;
     display: flex;
     justify-content: center;
+    flex-wrap: wrap;
     gap: 1rem;
-    margin: 1.25rem auto;
+    padding: 10px 0 14px;
     align-items: center;
+    background: transparent;
+    color: #333; /* contraste sur fond clair */
   }
-  button {
-    padding: 9px 22px;
-    border: 1px solid #ccc;
-    background: #fff;
-    cursor: pointer;
-    border-radius: 6px;
-    font-size: 0.95rem;
-    transition: transform 0.12s ease, box-shadow 0.12s ease;
+
+  /* Indicateur + Zoom */
+  #indicator { min-width: 160px; text-align: center; color: #333; font-size: 0.9rem; }
+
+  .zoom-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #333; /* lisible sur fond clair */
+    font-size: 0.9rem;
   }
-  button:not(:disabled):hover { box-shadow: 0 3px 8px rgba(0,0,0,0.15); transform: translateY(-1px); }
-  button:disabled { opacity: 0.4; cursor: default; }
-  #indicator { min-width: 130px; text-align: center; color: #444; font-size: 0.9rem; }
+  .zoom-control input[type="range"] {
+    width: 180px;
+    accent-color: #0b5fff;
+  }
+  .zoom-value {
+    min-width: 3.5em;
+    text-align: right;
+  }
+
+  /* Flèches latérales */
+  .side-arrow{
+    position:absolute;top:50%;transform:translateY(-50%);
+    width:60px;height:60px;border-radius:50%;
+    border:1px solid #c9d6e6;background:rgba(255,255,255,.9);
+    font-size:2rem;cursor:pointer;z-index:50;
+    box-shadow:0 4px 12px rgba(0,0,0,.2);transition:.2s;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .side-arrow:hover:not(:disabled){transform:translateY(-50%) scale(1.08);}
+  .side-arrow:disabled{opacity:.45;cursor:default;box-shadow:none;}
+  .left-arrow{left:20px;}
+  .right-arrow{right:20px;}
 
   @media (prefers-reduced-motion: reduce) {
-    .flip, .flip-strip, .flip-strip .shade, .lift-shadow, .page img { transition: none !important; }
+    .flip, .flip-face, .lift-shadow, .page img, .page, .book { transition: none !important; }
   }
 </style>
 </head>
 <body>
+<div class="app">
+  <div class="book-scene" aria-label="Lecteur de livre" id="scene">
+    <!-- Flèches latérales conservées -->
+    <button class="side-arrow left-arrow" id="sidePrev" aria-label="Page précédente">❮</button>
+    <button class="side-arrow right-arrow" id="sideNext" aria-label="Page suivante">❯</button>
 
-<div class="book-scene" aria-label="Lecteur de livre">
-  <div class="book-pedestal">
-    <div class="book" role="region" aria-live="polite" id="book">
-      <div class="page left"  id="left"  aria-label="Page gauche"></div>
-      <div class="spine" aria-hidden="true"></div>
-      <div class="page right" id="right" aria-label="Page droite"></div>
-      <div class="lift-shadow from-right" id="liftRight" aria-hidden="true"></div>
-      <div class="lift-shadow from-left"  id="liftLeft"  aria-hidden="true"></div>
+    <div class="book-pedestal" id="pedestal">
+      <div class="zoom-wrap" id="zoomWrap">
+        <div class="book" role="region" aria-live="polite" id="book">
+          <div class="page left"  id="left"  aria-label="Page gauche"></div>
+          <div class="spine" aria-hidden="true"></div>
+          <div class="page right" id="right" aria-label="Page droite"></div>
+          <div class="lift-shadow from-right" id="liftRight" aria-hidden="true"></div>
+          <div class="lift-shadow from-left"  id="liftLeft"  aria-hidden="true"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Contrôles bas: seuls l’indicateur et le zoom sont conservés -->
+  <div class="controls">
+    <span id="indicator" aria-live="polite"></span>
+    <div class="zoom-control" aria-label="Contrôle du zoom">
+      <label for="zoomRange">Zoom</label>
+      <input id="zoomRange" type="range" min="0.6" max="2" step="0.05" value="1"
+             aria-valuemin="0.6" aria-valuemax="2" aria-valuenow="1" aria-label="Zoom du livre">
+      <span class="zoom-value" id="zoomLabel">100%</span>
     </div>
   </div>
 </div>
 
-<div class="controls">
-  <button id="prev" aria-label="Page précédente">← Précédent</button>
-  <span id="indicator" aria-live="polite"></span>
-  <button id="next" aria-label="Page suivante">Suivant →</button>
-</div>
-
 <script>
-/* Définissez vos URLs ici (SharePoint/CDN) */
-const pageInputs = [
-  // Vos URLs d'images ici, dans l'ordre des pages
-];
+/* ============================================================
+   1) FORMAT D'UNE PAGE (mm) => ratios
+   ============================================================ */
+const bookWidthMM  = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--book-width-mm'))  || 210;
+const bookHeightMM = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--book-height-mm')) || 297;
+const pageRatio = bookWidthMM / bookHeightMM;        // ratio d'une page
+const spreadRatio = (2 * bookWidthMM) / bookHeightMM; // ratio d'un spread
+
+/* ============================================================
+   2) URLS DES PAGES
+   (Correction : normaliser les URLs GitHub "blob" -> "raw" + encodage)
+   ============================================================ */
+function normalizeUrl(url) {
+  if (typeof url !== "string") return null;
+
+  // GitHub blob -> raw
+  const blobPattern = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/i;
+  const m = url.match(blobPattern);
+  if (m) {
+    const owner = m[1];
+    const repo = m[2];
+    const branch = m[3];
+    const pathSegments = m[4].split('/').map(s => encodeURIComponent(s));
+    return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${pathSegments.join('/')}`;
+  }
+
+  // Raw déjà présent: encoder les segments chemin si nécessaire
+  if (/^https?:\/\/raw\.githubusercontent\.com\//i.test(url)) {
+    const parts = url.split('/');
+    if (parts.length > 7) {
+      const head = parts.slice(0, 7).join('/');
+      const tail = parts.slice(7).map(s => encodeURIComponent(decodeURIComponent(s))).join('/');
+      return `${head}/${tail}`;
+    }
+    return url;
+  }
+
+  // Sinon, retourner tel quel
+  return url;
+}
 
 function toUrl(entry) {
-  if (typeof entry === "string") return entry;
-  if (entry && typeof entry === "object" && typeof entry.url === "string") return entry.url;
+  if (typeof entry === "string") return normalizeUrl(entry);
+  if (entry && typeof entry === "object" && typeof entry.url === "string") return normalizeUrl(entry.url);
   return null;
 }
+
+const pageInputs = [
+  "https://github.com/ManonM15/BookFeatureTeam/blob/main/BookFeatureTeam(P1).png",
+  "https://github.com/ManonM15/BookFeatureTeam/blob/main/BookFeatureTeam(P2).png",
+  "https://github.com/ManonM15/BookFeatureTeam/blob/main/BookFeatureTeam(P3).png",
+  "https://github.com/ManonM15/BookFeatureTeam/blob/main/BookFeatureTeam(P4).png",
+  "https://github.com/ManonM15/BookFeatureTeam/blob/main/BookFeatureTeam(P5).png"
+];
 const pageUrls = pageInputs.map(toUrl).filter(Boolean);
 
-/* Construction des vues (couverture, paires internes, dernière) */
+/* ============================================================
+   3) VUES (spreads)
+   ============================================================ */
 function buildViews(urls) {
   const n = urls.length;
   const views = [];
   if (n === 0) return views;
 
-  views.push({ left: null, right: urls[0] }); // Couverture
+  // Couverture avant (page 1 seule à droite)
+  views.push({ left: null, right: urls[0], cover: "front" });
 
   let i = 1;
   while (i < n) {
-    const left = urls[i] || null;
-    const right = urls[i + 1] || null;
-
-    if (left && !right) {
-      if (n % 2 === 0) views.push({ left, right: null });
-      else views.push({ left: null, right: left });
-      break;
+    const isLast = i === n - 1;
+    if (isLast) {
+      // 4e de couverture (dernière page seule à gauche)
+      views.push({ left: urls[i], right: null, cover: "back" });
+      i += 1;
+    } else {
+      views.push({ left: urls[i], right: urls[i + 1], cover: false });
+      i += 2;
     }
-    views.push({ left, right });
-    i += 2;
   }
   return views;
 }
 const views = buildViews(pageUrls);
 
-/* Éléments DOM */
+/* ============================================================
+   4) DOM
+   ============================================================ */
 const leftEl = document.getElementById("left");
 const rightEl = document.getElementById("right");
-const prevBtn = document.getElementById("prev");
-const nextBtn = document.getElementById("next");
 const indicator = document.getElementById("indicator");
 const bookEl = document.getElementById("book");
 const liftRight = document.getElementById("liftRight");
 const liftLeft = document.getElementById("liftLeft");
+const pedestal = document.getElementById("pedestal");
+const scene = document.getElementById("scene");
+const zoomWrap = document.getElementById("zoomWrap");
+const zoomRange = document.getElementById("zoomRange");
+const zoomLabel = document.getElementById("zoomLabel");
+const sidePrev = document.getElementById("sidePrev");
+const sideNext = document.getElementById("sideNext");
 
 let viewIndex = 0;
 let isAnimating = false;
 
-/* Nombre de "lattes" verticales pour simuler la courbure de la page.
-   Plus il y en a, plus l'arc est lisse (mais plus coûteux en perf). */
-const STRIP_COUNT = 10;
+/* ============================================================
+   5) ADAPTATION DU LIVRE AU CONTENEUR + RELIURE
+   ============================================================ */
+function updateSpineWidth() {
+  const bookRect = bookEl.getBoundingClientRect();
+  if (!bookRect.width) return;
 
+  const proportional = bookRect.width * 0.018; // 1.8% de la largeur
+  const spinePx = Math.max(8, Math.min(36, proportional)); // 8px à 36px
+  document.documentElement.style.setProperty('--spine-width', spinePx.toFixed(1) + 'px');
+}
+
+function fitBookToContainer() {
+  const sceneRect = scene.getBoundingClientRect();
+  const availW = Math.max(0, sceneRect.width - 24);
+  const availH = Math.max(0, sceneRect.height - 24);
+  if (availW <= 0 || availH <= 0) return;
+
+  const currentView = views[viewIndex] || {};
+  const isCoverView = currentView.cover === "front" || currentView.cover === "back";
+  const ratio = isCoverView ? pageRatio : spreadRatio;
+
+  let w = availW;
+  let h = w / ratio;
+  if (h > availH) {
+    h = availH;
+    w = h * ratio;
+  }
+  bookEl.style.width = w + "px";
+  bookEl.style.height = h + "px";
+
+  updateSpineWidth();
+  updatePanBoundsAndClamp();
+  updatePannableState();
+}
+const resizeObserver = new ResizeObserver(() => fitBookToContainer());
+resizeObserver.observe(scene);
+window.addEventListener("resize", fitBookToContainer);
+
+/* ============================================================
+   6) AFFICHAGE D'UNE VUE
+   ============================================================ */
 function imgElem(src, alt) {
   const img = document.createElement("img");
   img.src = src;
@@ -337,9 +520,7 @@ function imgElem(src, alt) {
   img.loading = "lazy";
   img.decoding = "async";
   img.draggable = false;
-  img.addEventListener("load", () => {
-    requestAnimationFrame(() => img.classList.add("is-visible"));
-  });
+  img.addEventListener("load", () => requestAnimationFrame(() => img.classList.add("is-visible")));
   img.addEventListener("error", () => {
     console.error("Échec de chargement image:", src);
     img.style.opacity = 0.3;
@@ -348,150 +529,304 @@ function imgElem(src, alt) {
   });
   return img;
 }
-
 function clearPage(el) { el.innerHTML = ""; }
+
+function applyCoverMode(view) {
+  const isCover = view.cover === "front" || view.cover === "back";
+  bookEl.classList.toggle("cover-mode", isCover);
+  bookEl.classList.toggle("no-left", !view.left);
+  bookEl.classList.toggle("no-right", !view.right);
+
+  if (view.cover === "front") {
+    leftEl.style.width = "0%";
+    rightEl.style.width = "100%";
+  } else if (view.cover === "back") {
+    leftEl.style.width = "100%";
+    rightEl.style.width = "0%";
+  } else {
+    leftEl.style.width = "50%";
+    rightEl.style.width = "50%";
+  }
+}
 
 function renderStatic() {
   const view = views[viewIndex] || { left: null, right: null };
   clearPage(leftEl);
   clearPage(rightEl);
+  applyCoverMode(view);
+  fitBookToContainer();
+
   if (view.left)  leftEl.appendChild(imgElem(view.left, "Page gauche"));
   if (view.right) rightEl.appendChild(imgElem(view.right, "Page droite"));
+
   indicator.textContent = views.length ? `Vue ${viewIndex + 1} / ${views.length}` : "Aucune page";
-  prevBtn.disabled = viewIndex === 0 || isAnimating;
-  nextBtn.disabled = viewIndex >= views.length - 1 || isAnimating;
+
+  // Met à jour l'état des flèches latérales
+  sidePrev.disabled = isAnimating || viewIndex === 0;
+  sideNext.disabled = isAnimating || viewIndex >= views.length - 1;
 }
 
-/* Construit la feuille animée découpée en lattes verticales.
-   Chaque latte affiche une portion de l'image (via object-position
-   décalé) et pivote avec un angle propre, légèrement croissant vers
-   la reliure, pour donner l'illusion d'une page qui se courbe en
-   "S" pendant le tournage, comme du vrai papier. */
-function buildFlipSheet(src, direction) {
+/* ============================================================
+   7) UTILS ANIMATION
+   ============================================================ */
+function preload(src) {
+  return new Promise(resolve => {
+    if (!src) return resolve();
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => resolve();
+    img.onerror = () => resolve(); // on ne bloque pas l'anim en cas d'échec
+    img.src = src;
+  });
+}
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+
+/* Feuille standard (milieu de livre) */
+function buildFlipSheet(frontSrc, backSrc, direction) {
   const flip = document.createElement("div");
   flip.className = "flip";
-  flip.style.transformStyle = "preserve-3d";
+  flip.style.transformOrigin = direction === "next" ? "left center" : "right center";
 
-  const stripWidth = 100 / STRIP_COUNT;
+  const front = document.createElement("div");
+  front.className = "flip-face front";
+  if (frontSrc) front.appendChild(imgElem(frontSrc, "Recto"));
+  const frontCrease = document.createElement("div");
+  frontCrease.className = "crease";
+  front.appendChild(frontCrease);
 
-  for (let s = 0; s < STRIP_COUNT; s++) {
-    const strip = document.createElement("div");
-    strip.className = "flip-strip";
-    strip.style.width = stripWidth + "%";
-    strip.style.left = (s * stripWidth) + "%";
-    strip.style.backfaceVisibility = "hidden";
+  const back = document.createElement("div");
+  back.className = "flip-face back";
+  if (backSrc) back.appendChild(imgElem(backSrc, "Verso"));
+  const backCrease = document.createElement("div");
+  backCrease.className = "crease";
+  back.appendChild(backCrease);
 
-    // Origine de rotation : toujours le bord vers la reliure
-    const originSide = direction === "next" ? "left" : "right";
-    strip.style.transformOrigin = originSide + " center";
-
-    const img = imgElem(src, "Tourne-page");
-    // On affiche toute l'image mais on la recadre par latte
-    img.style.width = (STRIP_COUNT * 100) + "%";
-    img.style.left = (-s * 100) + "%";
-    strip.appendChild(img);
-
-    const shade = document.createElement("div");
-    shade.className = "shade";
-    strip.appendChild(shade);
-
-    flip.appendChild(strip);
-  }
-  return flip;
+  flip.appendChild(front);
+  flip.appendChild(back);
+  return { flip, frontCrease, backCrease };
 }
 
-/* Anime la rotation de chaque latte avec un angle qui croît
-   progressivement (effet d'arc / courbure), via requestAnimationFrame
-   plutôt qu'une seule transition CSS, pour un contrôle fin du timing. */
-function animateStrips(flip, direction, duration, onDone) {
-  const strips = Array.from(flip.querySelectorAll(".flip-strip"));
-  const total = strips.length;
+/* Animation générique avec callback de progression (0->1) pour piloter ombres */
+function animateRAF(duration, onUpdate, onDone) {
   const start = performance.now();
-
-  // Easing globale du tournage
-  function easeInOut(t) { return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2; }
-
   function frame(now) {
-    const elapsed = now - start;
-    const t = Math.min(elapsed / duration, 1);
+    const t = Math.min((now - start) / duration, 1);
     const eased = easeInOut(t);
-
-    strips.forEach((strip, idx) => {
-      // Décalage temporel léger par latte pour créer la courbure :
-      // les lattes proches de la reliure tournent un peu plus vite
-      // que celles du bord libre, ce qui produit un arc dynamique.
-      const proximityToSpine = direction === "next"
-        ? idx / (total - 1)        // 0 = bord libre, 1 = près de la reliure
-        : 1 - idx / (total - 1);
-      const localDelay = proximityToSpine * 0.18; // décalage de phase
-      const localT = Math.max(0, Math.min(1, (t - localDelay) / (1 - localDelay)));
-      const localEased = easeInOut(localT);
-
-      const angle = direction === "next" ? -180 * localEased : 180 * localEased;
-
-      // Bombement : une légère rotation X additionnelle au milieu du
-      // mouvement simule le gonflement de la page qui se courbe.
-      const bulge = Math.sin(localEased * Math.PI) * 6; // degrés
-      strip.style.transform = `rotateY(${angle}deg) rotateX(${bulge * (proximityToSpine - 0.5) * 0.4}deg)`;
-
-      // Aplatissement de la perspective sur la latte (assombrissement
-      // au passage à 90°, simulant un repli du papier)
-      const edgeOn = Math.sin(localEased * Math.PI);
-      const shade = strip.querySelector(".shade");
-      if (shade) shade.style.opacity = String(0.15 + 0.55 * edgeOn);
-    });
-
-    if (t < 1) {
-      requestAnimationFrame(frame);
-    } else {
-      onDone && onDone();
-    }
+    onUpdate(eased);
+    if (t < 1) requestAnimationFrame(frame);
+    else onDone && onDone();
   }
   requestAnimationFrame(frame);
 }
 
+/* ============================================================
+   8) ANIMATION DE TOURNE-PAGE
+   ============================================================ */
 function animateTurn(direction, onComplete) {
   if (isAnimating) return;
   isAnimating = true;
-  prevBtn.disabled = true;
-  nextBtn.disabled = true;
+
+  // Verrouille les flèches pendant l'animation
+  sidePrev.disabled = true;
+  sideNext.disabled = true;
 
   const currentView = views[viewIndex] || {};
-  const durationMs = parseFloat(getComputedStyle(document.documentElement)
-    .getPropertyValue('--turn-duration')) || 900;
+  const nextIndex = direction === "next" ? viewIndex + 1 : viewIndex - 1;
+  const nextView = views[nextIndex] || {};
+  const durationMs = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--turn-duration')) || 850;
 
-  const hasPage = direction === "next" ? !!currentView.right : !!currentView.left;
+  const leavingFrontCover = (direction === "next" && currentView.cover === "front");
+  const enteringFrontCover = (direction === "prev" && nextView.cover === "front");
+  const leavingBackCover   = (direction === "prev" && currentView.cover === "back");
+  const enteringBackCover  = (direction === "next" && nextView.cover === "back");
 
-  if (!hasPage) {
+  /* -------- OUVERTURE DE LA COUVERTURE AVANT -------- */
+  if (leavingFrontCover || enteringFrontCover) {
+    const coverImgSrc = direction === "next" ? currentView.right : nextView.right;
+
+    // Prépare le contenu dessous (spread) pour éviter un "saut"
+    if (direction === "next") {
+      bookEl.classList.remove("cover-mode", "no-left", "no-right");
+      leftEl.style.width = "50%";
+      rightEl.style.width = "50%";
+      clearPage(leftEl); clearPage(rightEl);
+      if (nextView.left)  leftEl.appendChild(imgElem(nextView.left, "Page gauche"));
+      if (nextView.right) rightEl.appendChild(imgElem(nextView.right, "Page droite"));
+      // Le livre change de ratio (page -> spread) avec transition CSS
+      fitBookToContainer(); // inclut updateSpineWidth
+    }
+
+    Promise.all([preload(coverImgSrc)]).then(() => {
+      const flip = document.createElement("div");
+      flip.className = "flip cover-flip";
+      flip.style.transformOrigin = "left center";
+      flip.style.left = "0%";
+
+      const front = document.createElement("div");
+      front.className = "flip-face front";
+      if (coverImgSrc) front.appendChild(imgElem(coverImgSrc, "Couverture"));
+      const frontCrease = document.createElement("div"); frontCrease.className = "crease"; front.appendChild(frontCrease);
+
+      const back = document.createElement("div");
+      back.className = "flip-face back";
+      const backCrease = document.createElement("div"); backCrease.className = "crease"; back.appendChild(backCrease);
+
+      flip.appendChild(front); flip.appendChild(back);
+      bookEl.appendChild(flip);
+
+      liftRight.classList.add("cover-from-right");
+      liftRight.style.opacity = "0";
+
+      animateRAF(durationMs, (eased) => {
+        // angle négatif (vers l'extérieur) pour ouverture depuis charnière gauche
+        const angle = -180 * eased;
+        const bulge = Math.sin(eased * Math.PI) * 6;
+        flip.style.transform = `rotateY(${angle}deg) rotateX(${bulge}deg)`;
+
+        const creaseI = Math.sin(eased * Math.PI);
+        frontCrease.style.opacity = String(creaseI * 0.9);
+        backCrease.style.opacity  = String(creaseI * 0.9);
+
+        // Ombre qui monte puis redescend
+        liftRight.style.opacity = String(creaseI * 0.9);
+      }, () => {
+        flip.remove();
+        liftRight.style.opacity = "0";
+        liftRight.classList.remove("cover-from-right");
+
+        onComplete && onComplete();
+        isAnimating = false;
+        renderStatic();
+      });
+    });
+    return;
+  }
+
+  /* -------- FERMETURE (ENTRÉE VERS 4e DE COUVERTURE) -------- */
+  if (enteringBackCover || leavingBackCover) {
+    const frontPageSrc = direction === "next" ? currentView.right : nextView.right; // recto du dernier feuillet
+    const coverImgSrc  = direction === "next" ? nextView.left     : currentView.left; // image de 4e de couverture
+
+    if (direction === "prev") {
+      // Réouverture depuis 4e : préparer le spread dessous
+      bookEl.classList.remove("cover-mode", "no-left", "no-right");
+      leftEl.style.width = "50%";
+      rightEl.style.width = "50%";
+      clearPage(leftEl); clearPage(rightEl);
+      if (nextView.left)  leftEl.appendChild(imgElem(nextView.left, "Page gauche"));
+      if (nextView.right) rightEl.appendChild(imgElem(nextView.right, "Page droite"));
+      fitBookToContainer(); // inclut updateSpineWidth
+    }
+
+    Promise.all([preload(frontPageSrc), preload(coverImgSrc)]).then(() => {
+      const flip = document.createElement("div");
+      flip.className = "flip";
+      flip.style.transformOrigin = "right center";
+      flip.style.left = "50%"; // demi-largeur droite
+
+      const front = document.createElement("div");
+      front.className = "flip-face front";
+      if (frontPageSrc) front.appendChild(imgElem(frontPageSrc, "Dernier recto"));
+      const frontCrease = document.createElement("div"); frontCrease.className = "crease"; front.appendChild(frontCrease);
+
+      const back = document.createElement("div");
+      back.className = "flip-face back";
+      if (coverImgSrc) back.appendChild(imgElem(coverImgSrc, "4e de couverture"));
+      const backCrease = document.createElement("div"); backCrease.className = "crease"; back.appendChild(backCrease);
+
+      flip.appendChild(front); flip.appendChild(back);
+      bookEl.appendChild(flip);
+
+      // On vide la page droite sous-jacente pour éviter un double visuel
+      clearPage(rightEl);
+
+      liftLeft.classList.add("cover-from-left");
+      liftLeft.style.opacity = "0";
+
+      animateRAF(durationMs, (eased) => {
+        // La fermeture rabat vers la gauche (angle négatif)
+        const angle = -180 * eased;
+        const bulge = Math.sin(eased * Math.PI) * 6;
+        flip.style.transform = `rotateY(${angle}deg) rotateX(${bulge}deg)`;
+
+        const creaseI = Math.sin(eased * Math.PI);
+        frontCrease.style.opacity = String(creaseI * 0.9);
+        backCrease.style.opacity  = String(creaseI * 0.9);
+
+        liftLeft.style.opacity = String(creaseI * 0.9);
+      }, () => {
+        flip.remove();
+        liftLeft.style.opacity = "0";
+        liftLeft.classList.remove("cover-from-left");
+
+        if (direction === "next") {
+          // On est désormais en mode "page simple" (4e) ; le ratio s'ajuste avec transition
+          bookEl.classList.add("cover-mode", "no-right");
+          leftEl.style.width = "100%";
+          rightEl.style.width = "0%";
+        }
+
+        onComplete && onComplete();
+        isAnimating = false;
+        renderStatic();
+      });
+    });
+    return;
+  }
+
+  /* -------- TOURNE-PAGE NORMAL (intérieur) -------- */
+  const hasSheet = direction === "next" ? !!currentView.right : !!currentView.left;
+  if (!hasSheet) {
     onComplete && onComplete();
     isAnimating = false;
     renderStatic();
     return;
   }
 
-  const src = direction === "next" ? currentView.right : currentView.left;
-  const flip = buildFlipSheet(src, direction);
+  const frontSrc = direction === "next" ? currentView.right : currentView.left;
+  const backSrc  = direction === "next" ? nextView.left     : nextView.right;
 
-  if (direction === "next") {
-    flip.style.right = "0";
-    liftRight.classList.add("show");
-  } else {
-    flip.style.left = "0";
-    liftLeft.classList.add("show");
-  }
-  flip.classList.add("animating");
-  bookEl.appendChild(flip);
+  Promise.all([preload(frontSrc), preload(backSrc)]).then(() => {
+    const { flip, frontCrease, backCrease } = buildFlipSheet(frontSrc, backSrc, direction);
 
-  animateStrips(flip, direction, durationMs, () => {
-    flip.remove();
-    liftRight.classList.remove("show");
-    liftLeft.classList.remove("show");
-    onComplete && onComplete();
-    isAnimating = false;
-    renderStatic();
+    if (direction === "next") {
+      flip.style.left = "50%";
+    } else {
+      flip.style.left = "0%";
+    }
+    bookEl.appendChild(flip);
+
+    // Sélectionne l'ombre appropriée et initialise à 0
+    const liftEl = direction === "next" ? liftRight : liftLeft;
+    liftEl.style.opacity = "0";
+
+    animateRAF(durationMs, (eased) => {
+      const angle = direction === "next" ? -180 * eased : 180 * eased;
+      const bulge = Math.sin(eased * Math.PI) * 5;
+      flip.style.transform = `rotateY(${angle}deg) rotateX(${bulge}deg)`;
+
+      const creaseI = Math.sin(eased * Math.PI);
+      frontCrease.style.opacity = String(creaseI * 0.9);
+      backCrease.style.opacity  = String(creaseI * 0.9);
+
+      // Ombre qui monte puis redescend
+      liftEl.style.opacity = String(creaseI * 0.9);
+    }, () => {
+      flip.remove();
+      liftRight.style.opacity = "0";
+      liftLeft.style.opacity = "0";
+      onComplete && onComplete();
+      isAnimating = false;
+      renderStatic();
+    });
   });
 }
 
+/* ============================================================
+   9) NAVIGATION
+   ============================================================ */
 function nextPage() {
   if (isAnimating || viewIndex >= views.length - 1) return;
   animateTurn("next", () => { viewIndex++; });
@@ -501,19 +836,145 @@ function prevPage() {
   animateTurn("prev", () => { viewIndex--; });
 }
 
-prevBtn.addEventListener("click", prevPage);
-nextBtn.addEventListener("click", nextPage);
+/* ============================================================
+   10) ZOOM
+   ============================================================ */
+function setZoom(val) {
+  const z = Math.max(0.6, Math.min(2, Number(val)));
+  document.documentElement.style.setProperty('--zoom', String(z));
+  zoomRange.value = String(z);
+  zoomRange.setAttribute('aria-valuenow', String(z));
+  zoomLabel.textContent = Math.round(z * 100) + '%';
+  updatePanBoundsAndClamp();
+  updatePannableState();
+}
+zoomRange.addEventListener('input', (e) => {
+  setZoom((e.target && e.target.value) || '1');
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === '+' || e.key === '=') setZoom(parseFloat(zoomRange.value) + 0.05);
+  else if (e.key === '-' || e.key === '_') setZoom(parseFloat(zoomRange.value) - 0.05);
+});
+zoomWrap.addEventListener('dblclick', () => setZoom(1));
 
+/* ============================================================
+   11) PAN quand zoom > 1
+   ============================================================ */
+let pan = { x: 0, y: 0 };
+let panMax = { x: 0, y: 0 };
+let dragState = null;
+
+function applyPan() {
+  document.documentElement.style.setProperty('--pan-x', pan.x.toFixed(1) + 'px');
+  document.documentElement.style.setProperty('--pan-y', pan.y.toFixed(1) + 'px');
+}
+function clampPan(nx, ny) {
+  const clampedX = Math.max(-panMax.x, Math.min(panMax.x, nx));
+  const clampedY = Math.max(-panMax.y, Math.min(panMax.y, ny));
+  return { x: clampedX, y: clampedY };
+}
+function updatePanBoundsAndClamp() {
+  const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--zoom')) || 1;
+  const bookRect = bookEl.getBoundingClientRect();
+  const wrapRect = pedestal.getBoundingClientRect();
+  if (!bookRect.width || !wrapRect.width) return;
+
+  const scaledW = bookRect.width * z;
+  const scaledH = bookRect.height * z;
+  const viewW = wrapRect.width;
+  const viewH = wrapRect.height;
+
+  panMax.x = Math.max(0, (scaledW - viewW) / 2);
+  panMax.y = Math.max(0, (scaledH - viewH) / 2);
+
+  const c = clampPan(pan.x, pan.y);
+  pan.x = c.x; pan.y = c.y;
+  applyPan();
+}
+function updatePannableState() {
+  const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--zoom')) || 1;
+  if (z > 1.001 && (panMax.x > 0 || panMax.y > 0)) {
+    zoomWrap.classList.add('pannable');
+  } else {
+    zoomWrap.classList.remove('pannable');
+  }
+}
+
+pedestal.addEventListener('mousedown', (e) => {
+  const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--zoom')) || 1;
+  if (z <= 1.001) return;
+  if ((e.target.closest('.controls') || e.button !== 0)) return;
+  dragState = { startX: e.clientX, startY: e.clientY, origX: pan.x, origY: pan.y };
+  zoomWrap.classList.add('panning');
+  e.preventDefault();
+});
+window.addEventListener('mousemove', (e) => {
+  if (!dragState) return;
+  const dx = e.clientX - dragState.startX;
+  const dy = e.clientY - dragState.startY;
+  const next = clampPan(dragState.origX + dx, dragState.origY + dy);
+  pan.x = next.x; pan.y = next.y;
+  applyPan();
+});
+window.addEventListener('mouseup', () => {
+  if (!dragState) return;
+  dragState = null;
+  zoomWrap.classList.remove('panning');
+});
+
+pedestal.addEventListener('touchstart', (e) => {
+  const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--zoom')) || 1;
+  if (z <= 1.001) return;
+  if (e.touches.length !== 1) return;
+  const t = e.touches[0];
+  dragState = { startX: t.clientX, startY: t.clientY, origX: pan.x, origY: pan.y };
+  zoomWrap.classList.add('panning');
+}, { passive: true });
+pedestal.addEventListener('touchmove', (e) => {
+  if (!dragState || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const dx = t.clientX - dragState.startX;
+  const dy = t.clientY - dragState.startY;
+  const next = clampPan(dragState.origX + dx, dragState.origY + dy);
+  pan.x = next.x; pan.y = next.y;
+  applyPan();
+}, { passive: true });
+pedestal.addEventListener('touchend', () => {
+  if (!dragState) return;
+  dragState = null;
+  zoomWrap.classList.remove('panning');
+}, { passive: true });
+
+pedestal.addEventListener('wheel', (e) => {
+  const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--zoom')) || 1;
+  if (z <= 1.001) return;
+  const deltaX = (e.shiftKey ? e.deltaY : e.deltaX) || 0;
+  const deltaY = (e.shiftKey ? 0 : e.deltaY) || 0;
+  const speed = 0.8;
+  const next = clampPan(pan.x - deltaX * speed, pan.y - deltaY * speed);
+  pan.x = next.x; pan.y = next.y;
+  applyPan();
+  e.preventDefault();
+}, { passive: false });
+
+/* ============================================================
+   12) ÉVÉNEMENTS PAGE
+   ============================================================ */
+// Flèches latérales
+sidePrev.addEventListener("click", prevPage);
+sideNext.addEventListener("click", nextPage);
+
+// Clavier
 document.addEventListener("keydown", (e) => {
   if (e.key === "ArrowRight") nextPage();
   if (e.key === "ArrowLeft")  prevPage();
 });
 
+// Gestes tactiles
 let touchStartX = 0;
 bookEl.addEventListener("touchstart", (e) => {
   if (e.touches && e.touches.length === 1) touchStartX = e.touches[0].clientX;
 }, { passive: true });
-
 bookEl.addEventListener("touchend", (e) => {
   if (!touchStartX) return;
   const endX = (e.changedTouches && e.changedTouches[0]?.clientX) || 0;
@@ -523,8 +984,20 @@ bookEl.addEventListener("touchend", (e) => {
   touchStartX = 0;
 }, { passive: true });
 
-renderStatic();
-</script>
+// Clic direct sur les pages
+leftEl.addEventListener("click",()=>{ if(!isAnimating && viewIndex>0) prevPage(); });
+rightEl.addEventListener("click",()=>{ if(!isAnimating && viewIndex<views.length-1) nextPage(); });
 
+/* ============================================================
+   13) INIT
+   ============================================================ */
+function init() {
+  fitBookToContainer();
+  setZoom(1);
+  renderStatic();
+  setTimeout(() => { fitBookToContainer(); updatePanBoundsAndClamp(); updatePannableState(); }, 0);
+}
+init();
+</script>
 </body>
 </html>
